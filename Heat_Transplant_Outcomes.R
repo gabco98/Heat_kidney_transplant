@@ -249,3 +249,66 @@ Model_Multi31_creat <- glmer(creatinine_status ~ as.factor(sub_period) + HEAT_31
                              data = data_log_log, control = glmerControl(optimizer = "bobyqa"), nAGQ=0)
 HR_31_creat <- exp(fixef(Model_Multi31_creat))
 CI_31_creat<- exp(confint(Model_Multi31_creat, method = "Wald"))
+
+
+#MAKE analysis
+
+#define MAKE
+data_consistentFU_final <- data_consistentFU_final %>%
+  group_by(PT_CODE) %>%
+  mutate(baseline_creatinine = first(CREAT, order_by = VAL_DT_TRF)) %>%  # Define baseline creatinine as the first measure for each PT_CODE
+  mutate(creatinine_status = case_when(
+    CREAT >= 2 * baseline_creatinine ~ 1,
+    TRUE ~ 0
+  )) %>%
+  ungroup()
+
+data_consistentFU_final <- data_consistentFU_final %>%
+  group_by(PT_CODE) %>% mutate(CREAT_DOUBLING_DATE = if_else(creatinine_status == 1, VAL_DT_TRF, as.Date(NA))) %>% ungroup()
+
+data_consistentFU_final <- data_consistentFU_final %>%
+  group_by(PT_CODE) %>%
+  mutate(MAKE_CENSOR_DATE = case_when(
+    !is.na(CREAT_DOUBLING_DATE) & CREAT_DOUBLING_DATE < CENSOR_DATE ~ CREAT_DOUBLING_DATE,
+    TRUE ~ CENSOR_DATE)) %>% ungroup()
+data_consistentFU_final$FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS<- (as.Date(data_consistentFU_final$MAKE_CENSOR_DATE)-as.Date(data_consistentFU_final$TX_DATE.x))/365.25
+
+make_censoring<- data_consistentFU_final %>% dplyr::select(PT_CODE, creatinine_status, MAKE_CENSOR_DATE, FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS)
+
+make_censoring<- make_censoring %>% group_by(PT_CODE) %>% summarize(CREATININE_STATUS=max(creatinine_status), MAKE_CENSOR_DATE=min(MAKE_CENSOR_DATE), FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS=min(FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS)) 
+
+data_wide_consistent <- merge(data_wide_consistent, make_censoring, by="PT_CODE")
+
+data_wide_consistent$MAKE<-NA
+data_wide_consistent$MAKE<-0
+data_wide_consistent$MAKE[data_wide_consistent$GSTATUS_KI==1|data_wide_consistent$PSTATUS==1|data_wide_consistent$DOUBLING_CR.y==1]<-1
+
+
+data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_10YEARS<-as.numeric(data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS)
+data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_10YEARS[data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS>=10]<-10
+
+data_wide_consistent$MAKE_10YEARS<-NA
+data_wide_consistent$MAKE_10YEARS[data_wide_consistent$MAKE==0]<- 0
+data_wide_consistent$MAKE_10YEARS[data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS>=10 & data_wide_consistent$MAKE==1]<-0
+data_wide_consistent$MAKE_10YEARS[data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS<10 & data_wide_consistent$MAKE==1]<-1
+data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_10YEARS<-as.numeric(data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS)
+data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_10YEARS[data_wide_consistent$FOLLOW_UP_UNTIL_MAKE_CENSORING_YEARS>=10]<-10
+
+
+#landmark design
+cox_data<- data_wide_consistent %>% filter(
+  !(CR_10YEARS == 1 & FOLLOW_UP_UNTIL_SCR_10YEARS <= 2),
+  !(MAKE_10YEARS == 1 & FOLLOW_UP_UNTIL_MAKE_CENSORING_10YEARS <= 2)
+)
+
+cox <- coxph(Surv(as.numeric(FOLLOW_UP_UNTIL_MAKE_CENSORING_10YEARS), as.numeric(MAKE_10YEARS)) ~ 
+               overall_HI_quartile + 
+               GENDER_MALE1_FEMALE0 + AGE +AA + AGE_DON+
+               TAC.y +
+               steroid.y + depleting.y + DONOR  + 
+               + DIABETES_imputed.y + 
+               + DIABETES_DONOR_imputed.y  + 
+               scale(END_BMI_CALC_imputed.y) + scale(BMI_DON_CALC_imputed.y) + HLAMIS_imputed.y  +
+               scale(DIALYSIS_TIME_imputed.y) + scale(END_CPRA_imputed.y) + scale(COLD_ISCH_KI_imputed.y) + scale(KDPI_DON_TY_imputed.y) + PAYER + WORK_imputed.y + EDLEVEL_imputed,
+             cluster = TX_CTR_CODE, 
+             data = cox_data)
